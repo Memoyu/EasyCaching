@@ -21,7 +21,7 @@
 
             foreach (var item in values)
             {
-                list.Add( new GeoEntry(item.longitude, item.latitude, item.member));
+                list.Add(new GeoEntry(item.longitude, item.latitude, item.member));
             }
 
             var res = _cache.GeoAdd(cacheKey, list.ToArray());
@@ -115,12 +115,17 @@
             {
                 if (item.HasValue)
                 {
-                    tuple.Add((Convert.ToDecimal(item.Value.Longitude.ToString()), Convert.ToDecimal(item.Value.Latitude.ToString())));
+                    var longitude = Convert.ToDecimal(item.Value.Longitude.ToString());
+                    var latitude = Convert.ToDecimal(item.Value.Latitude.ToString());
+                    // returns { Longitude = 0,Latitude = 0 } if it does not exist
+                    if (longitude != 0 && latitude != 0)
+                    {
+                        tuple.Add((longitude, latitude));
+                        continue;
+                    }
                 }
-                else
-                {
-                    tuple.Add(null);
-                }
+
+                tuple.Add(null);
             }
 
             return tuple;
@@ -145,13 +150,17 @@
             {
                 if (item.HasValue)
                 {
-                    tuple.Add((Convert.ToDecimal(item.Value.Longitude.ToString()), Convert.ToDecimal(item.Value.Latitude.ToString())));
-                }
-                else
-                {
-                    tuple.Add(null);
+                    var longitude = Convert.ToDecimal(item.Value.Longitude.ToString());
+                    var latitude = Convert.ToDecimal(item.Value.Latitude.ToString());
+                    // returns { Longitude = 0,Latitude = 0 } if it does not exist
+                    if (longitude != 0 && latitude != 0)
+                    {
+                        tuple.Add((longitude, latitude));
+                        continue;
+                    }
                 }
 
+                tuple.Add(null);
             }
 
             return tuple;
