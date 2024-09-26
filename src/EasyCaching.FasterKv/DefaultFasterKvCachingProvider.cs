@@ -305,7 +305,7 @@ namespace EasyCaching.FasterKv
             if (MaxRdSecond > 0)
             {
                 var addSec = RandomHelper.GetNext(1, MaxRdSecond);
-                expiration.Add(new TimeSpan(0, 0, addSec));
+                expiration = expiration.Add(new TimeSpan(0, 0, addSec));
             }
 
             var key = GetKeySpanByte(cacheKey);

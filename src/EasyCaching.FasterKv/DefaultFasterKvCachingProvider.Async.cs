@@ -203,7 +203,7 @@ namespace EasyCaching.FasterKv
                 else
                 {
                     // delete expired cache
-                    await session.Session.DeleteAsync(key, token: cancellationToken).ConfigureAwait(false);
+                    await session.Session.DeleteAsync(GetKeySpanByte(cacheKey), token: cancellationToken).ConfigureAwait(false);
                 }
             }
 

@@ -1,10 +1,12 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Threading.Tasks;
 using EasyCaching.Core;
 using EasyCaching.Core.Configurations;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 using Xunit.Abstractions;
+using Xunit.Sdk;
 
 namespace EasyCaching.UnitTests.CachingTests;
 
@@ -15,7 +17,7 @@ public class FasterKvCachingProviderTest : BaseCachingProviderTest
     public FasterKvCachingProviderTest(ITestOutputHelper testOutputHelper)
     {
         _testOutputHelper = testOutputHelper;
-        _defaultTs = TimeSpan.FromSeconds(30);
+        _defaultTs = TimeSpan.FromSeconds(1000);
     }
 
     protected override IEasyCachingProvider CreateCachingProvider(Action<BaseProviderOptions> additionalSetup)
@@ -42,9 +44,19 @@ public class FasterKvCachingProviderTest : BaseCachingProviderTest
             _provider.Set($"Key_{i}", $"Cache_{i}", _defaultTs);
         }
 
+        //_testOutputHelper.WriteLine(_provider.Get<string>($"Key_{9_9999}").Value);
+
         for (int i = 0; i < 10_0000; i++)
         {
-            var value = _provider.Get<string>($"Key_{i}");
+            var key = $"Key_{i}";
+
+            var value = _provider.Get<string>(key);
+
+            if (!value.HasValue)
+            {
+                _testOutputHelper.WriteLine(key);
+            }
+
             Assert.True(value.HasValue);
             Assert.Equal(value.Value, $"Cache_{i}");
         }
@@ -53,17 +65,25 @@ public class FasterKvCachingProviderTest : BaseCachingProviderTest
     [Fact]
     protected async Task SetAsync_And_GetAsync_Big_DataSet_Should_Succeed()
     {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+
         // set 10w key
         for (int i = 0; i < 10_0000; i++)
         {
-            await _provider.SetAsync($"Key_{i}", $"Cache_{i}", _defaultTs);
+            await _provider.SetAsync($"Key_Async_{i}", $"Cache_Async_{i}", _defaultTs);
         }
 
+        _testOutputHelper.WriteLine(_provider.Get<string>($"Key_{9_9999}").Value ?? "空的");
+
         for (int i = 0; i < 10_0000; i++)
-        {
-            var value = await _provider.GetAsync<string>($"Key_{i}");
+        {  
+            var value = await _provider.GetAsync<string>($"Key_Async_{i}");
+            if (!value.HasValue)
+            {
+
+            }
             Assert.True(value.HasValue);
-            Assert.Equal(value.Value, $"Cache_{i}");
+            Assert.Equal(value.Value, $"Cache_Async_{i}");
         }
     }
 
