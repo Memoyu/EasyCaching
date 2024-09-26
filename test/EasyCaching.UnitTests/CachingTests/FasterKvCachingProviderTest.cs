@@ -164,4 +164,51 @@ public class FasterKvCachingProviderTest : BaseCachingProviderTest
     {
         return Task.CompletedTask;
     }
+
+    [Fact]
+    protected async Task Cache_Expired_Should_Succeed()
+    {
+        var key = "key_test";
+        var key_sync = "key_test_sync";
+        var value = "cache_Key_test";
+
+        await _provider.SetAsync(key, value, TimeSpan.FromSeconds(1));
+        _provider.Set(key_sync, value, TimeSpan.FromSeconds(1));
+
+        var val = await _provider.GetAsync<string>(key);
+        var val_sync = _provider.Get<string>(key_sync);
+
+        Assert.True(val.HasValue);
+        Assert.True(val.Value == value);
+        Assert.True(val_sync.HasValue);
+        Assert.True(val_sync.Value == value);
+
+        await Task.Delay(2 * 1000);
+
+        val = await _provider.GetAsync<string>(key);
+        val_sync = _provider.Get<string>(key_sync);
+
+        Assert.True(val.IsNull);
+        Assert.True(val_sync.IsNull);
+    }
+
+    [Fact]
+    protected async Task Cache_Expired_After_Set_Should_Succeed()
+    {
+        var key = "key_test";
+        var value = "cache_Key_test";
+
+        await _provider.SetAsync(key, value, TimeSpan.FromSeconds(1));
+        var val = await _provider.GetAsync<string>(key);
+        Assert.True(val.HasValue);
+
+        await Task.Delay(2000);
+
+        val = await _provider.GetAsync<string>(key);
+        Assert.True(val.IsNull);
+
+        await _provider.SetAsync(key, value, TimeSpan.FromSeconds(1));
+        val = await _provider.GetAsync<string>(key);
+        Assert.True(val.HasValue);
+    }
 }

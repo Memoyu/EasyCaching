@@ -1,11 +1,15 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text;
 using EasyCaching.Core;
+using EasyCaching.Core.Internal;
 using EasyCaching.Core.Serialization;
 using EasyCaching.FasterKv.Configurations;
+using EasyCaching.FasterKv.Internal;
 using FASTER.core;
 using Microsoft.Extensions.Logging;
 
@@ -116,15 +120,14 @@ namespace EasyCaching.FasterKv
         {
             ArgumentCheck.NotNullOrWhiteSpace(cacheKey, nameof(cacheKey));
             EnsureNotDispose();
-            
+
             using var sessionWarp = GetSession();
-            var key = GetSpanByte(cacheKey);
+            var key = GetKeySpanByte(cacheKey);
             var result = sessionWarp.Session.Read(key);
             if (result.status.IsPending)
                 sessionWarp.Session.CompletePending(true);
             return result.status.Found;
         }
-
 
         public override void BaseFlush()
         {
@@ -136,7 +139,6 @@ namespace EasyCaching.FasterKv
                 session.Session.Delete(ref iter.GetKey());
             }
         }
-
 
         public override CacheValue<T> BaseGet<T>(string cacheKey, Func<T> dataRetriever, TimeSpan expiration)
         {
@@ -165,11 +167,11 @@ namespace EasyCaching.FasterKv
         {
             ArgumentCheck.NotNullOrWhiteSpace(cacheKey, nameof(cacheKey));
             EnsureNotDispose();
-            
+
             using var session = GetSession();
             return BaseGetInternal<T>(cacheKey, session);
         }
-        
+
         public override IEnumerable<string> BaseGetAllKeysByPrefix(string prefix)
         {
             throw new NotSupportedException();
@@ -179,7 +181,7 @@ namespace EasyCaching.FasterKv
         {
             ArgumentCheck.NotNullAndCountGTZero(cacheKeys, nameof(cacheKeys));
             EnsureNotDispose();
-            
+
             using var session = GetSession();
             var dic = new Dictionary<string, CacheValue<T>>();
             foreach (var cacheKey in cacheKeys)
@@ -190,40 +192,38 @@ namespace EasyCaching.FasterKv
             return dic;
         }
 
-
         public override void BaseRemove(string cacheKey)
         {
             ArgumentCheck.NotNullOrWhiteSpace(cacheKey, nameof(cacheKey));
             EnsureNotDispose();
-            
+
             using var session = GetSession();
             // ignore result
-            _ = session.Session.Delete(GetSpanByte(cacheKey));
+            _ = session.Session.Delete(GetKeySpanByte(cacheKey));
         }
 
         public override void BaseRemoveAll(IEnumerable<string> cacheKeys)
         {
             ArgumentCheck.NotNullAndCountGTZero(cacheKeys, nameof(cacheKeys));
             EnsureNotDispose();
-            
+
             using var session = GetSession();
             foreach (var cacheKey in cacheKeys)
             {
-                _ = session.Session.Delete(GetSpanByte(cacheKey));
+                _ = session.Session.Delete(GetKeySpanByte(cacheKey));
             }
         }
-
 
         public override void BaseSet<T>(string cacheKey, T cacheValue, TimeSpan expiration)
         {
             ArgumentCheck.NotNullOrWhiteSpace(cacheKey, nameof(cacheKey));
             ArgumentCheck.NotNull(cacheValue, nameof(cacheValue), _options.CacheNulls);
             ArgumentCheck.NotNegativeOrZero(expiration, nameof(expiration));
-            
+
             EnsureNotDispose();
-            
+
             using var sessionWarp = GetSession();
-            BaseSetInternal(sessionWarp, cacheKey, cacheValue);
+            BaseSetInternal(sessionWarp, cacheKey, cacheValue, expiration);
         }
 
         public override void BaseSetAll<T>(IDictionary<string, T> values, TimeSpan expiration)
@@ -234,7 +234,7 @@ namespace EasyCaching.FasterKv
             using var session = GetSession();
             foreach (var kp in values)
             {
-                BaseSetInternal(session, kp.Key, kp.Value);
+                BaseSetInternal(session, kp.Key, kp.Value, expiration);
             }
         }
 
@@ -249,26 +249,23 @@ namespace EasyCaching.FasterKv
             var result = BaseGet<T>(cacheKey);
             if (result.HasValue == false)
             {
-                BaseSetInternal(session, cacheKey, cacheValue);
+                BaseSetInternal(session, cacheKey, cacheValue, expiration);
                 return true;
             }
-            
+
             return false;
         }
-
 
         public override ProviderInfo BaseGetProviderInfo()
         {
             return _info;
         }
 
-        
-        
-
         private CacheValue<T> BaseGetInternal<T>(string cacheKey, ClientSessionWrap session)
         {
             var context = new StoreContext();
-            var result = session.Session.Read(GetSpanByte(cacheKey), context);
+            var key = GetKeySpanByte(cacheKey);
+            var result = session.Session.Read(key, context);
             if (result.status.IsPending)
             {
                 session.Session.CompletePending(true);
@@ -277,11 +274,23 @@ namespace EasyCaching.FasterKv
 
             if (result.status.Found)
             {
-                CacheStats.OnHit();
-                if (_options.EnableLogging)
-                    _logger?.LogInformation("Cache Hit : cacheKey = {CacheKey}", cacheKey);
-                var value = GetTValue<T>(ref result.output);
-                return new CacheValue<T>(value, true);
+                var cached = GetTValue<FasterKvCacheValue>(ref result.output);
+
+                if (cached.Expiration > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+                {
+                    if (_options.EnableLogging)
+                        _logger?.LogInformation("Cache Hit : cacheKey = {CacheKey}", cacheKey);
+
+                    CacheStats.OnHit();
+
+                    var value = _serializer.Deserialize<T>(cached.Value);
+                    return new CacheValue<T>(value, true);
+                }
+                else
+                {
+                    // delete expired cache
+                    session.Session.Delete(key);
+                }
             }
 
             CacheStats.OnMiss();
@@ -291,17 +300,37 @@ namespace EasyCaching.FasterKv
             return CacheValue<T>.NoValue;
         }
 
-        private void BaseSetInternal<T>(ClientSessionWrap sessionWarp, string cacheKey, T cacheValue)
+        private void BaseSetInternal<T>(ClientSessionWrap sessionWarp, string cacheKey, T cacheValue, TimeSpan expiration)
         {
-            var key = GetSpanByte(cacheKey);
-            var value = GetSpanByte(cacheValue);
+            if (MaxRdSecond > 0)
+            {
+                var addSec = RandomHelper.GetNext(1, MaxRdSecond);
+                expiration.Add(new TimeSpan(0, 0, addSec));
+            }
+
+            var key = GetKeySpanByte(cacheKey);
+            var value = GetValueSpanByte(cacheValue, expiration);
             _ = sessionWarp.Session.Upsert(key, value);
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private SpanByte GetSpanByte<T>(T value)
+        private SpanByte GetKeySpanByte(string cacheKey)
         {
-            var bytes = _serializer.Serialize(value);
+            var bytes = Encoding.UTF8.GetBytes(cacheKey);
+            return GetSpanByte(bytes);
+        }
+
+        private SpanByte GetValueSpanByte<T>(T value, TimeSpan ts)
+        {
+            var valueBytes = _serializer.Serialize(value);
+            var cached = new FasterKvCacheValue(valueBytes, DateTimeOffset.UtcNow.AddSeconds((int)ts.TotalSeconds).ToUnixTimeMilliseconds());
+            var bytes = _serializer.Serialize(cached);
+
+            return GetSpanByte(bytes);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private SpanByte GetSpanByte(byte[] bytes)
+        {
             bytes.AsSpan().GetPinnableReference();
             return SpanByte.FromFixedSpan(bytes);
         }
@@ -311,7 +340,6 @@ namespace EasyCaching.FasterKv
         {
             return _serializer.Deserialize<T>(span.Memory.Memory.ToArray());
         }
-
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void EnsureNotDispose()
@@ -350,7 +378,6 @@ namespace EasyCaching.FasterKv
         {
             throw new NotSupportedException("BaseGetCount is not supported in FasterKv provider.");
         }
-
         public override void BaseRemoveByPrefix(string prefix)
         {
             throw new NotSupportedException("BaseRemoveByPrefix is not supported in FasterKv provider.");
@@ -367,23 +394,23 @@ namespace EasyCaching.FasterKv
         {
             if (_disposed)
                 return;
-            
+
             foreach (var session in _sessionPool)
             {
                 session.Dispose();
             }
-            
+
             if (_options.CustomStore != _fasterKv)
             {
                 if (_options.DeleteFileOnClose == false)
                 {
                     _fasterKv.TakeFullCheckpointAsync(CheckpointType.FoldOver).AsTask().GetAwaiter().GetResult();
                 }
-                _fasterKv.Dispose();   
+                _fasterKv.Dispose();
             }
-            
+
             _logDevice?.Dispose();
-            
+
             _disposed = true;
         }
 
